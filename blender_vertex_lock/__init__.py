@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Vertex Lock",
     "author": "Antigravity",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N-Panel) > Vertex Lock",
     "description": "Lock vertices, edges, and faces in place to prevent them from moving during proportional editing",
@@ -27,12 +27,13 @@ def register_keymaps():
     # Register within Mesh keymap (active in Edit Mode)
     km = kc.keymaps.new(name="Mesh", space_type='EMPTY')
 
-    # Lock Selected: Shift + L
+    # Lock Selected: Ctrl + Alt + L (avoids overriding Blender's native Shift+L Deselect Linked)
     kmi_lock = km.keymap_items.new(
         "mesh.vertex_lock_selected",
         type='L',
         value='PRESS',
-        shift=True
+        ctrl=True,
+        alt=True
     )
     addon_keymaps.append((km, kmi_lock))
 

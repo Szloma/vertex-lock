@@ -1,7 +1,7 @@
 import bpy
 import bmesh
 from bpy.props import StringProperty
-from .draw import tag_redraw_view3d
+from .draw import tag_redraw_view3d, get_cached_counts
 
 def get_active_shortcut(idname):
     """Dynamically resolves the active user-assigned shortcut string for an operator."""
@@ -91,20 +91,24 @@ class MESH_PT_vertex_lock_panel(bpy.types.Panel):
         col = box.column(align=True)
 
         if is_edit_mode:
-            total_verts = len(obj.data.vertices)
-            locked_count = 0
-            sel_locked_count = 0
-            try:
-                bm = bmesh.from_edit_mesh(obj.data)
-                layer = bm.verts.layers.int.get("vertex_lock")
-                if layer:
-                    locked_count = sum(1 for v in bm.verts if v[layer] >= 1 or v.hide)
-                    sel_locked_count = sum(1 for v in bm.verts if v[layer] == 2)
-                else:
-                    locked_count = sum(1 for v in bm.verts if v.hide)
-                total_verts = len(bm.verts)
-            except Exception:
-                pass
+            cached_counts = get_cached_counts(obj)
+            if cached_counts is not None:
+                locked_count, sel_locked_count, total_verts = cached_counts
+            else:
+                total_verts = len(obj.data.vertices)
+                locked_count = 0
+                sel_locked_count = 0
+                try:
+                    bm = bmesh.from_edit_mesh(obj.data)
+                    layer = bm.verts.layers.int.get("vertex_lock")
+                    if layer:
+                        locked_count = sum(1 for v in bm.verts if v[layer] >= 1 or v.hide)
+                        sel_locked_count = sum(1 for v in bm.verts if v[layer] == 2)
+                    else:
+                        locked_count = sum(1 for v in bm.verts if v.hide)
+                    total_verts = len(bm.verts)
+                except Exception:
+                    pass
 
             row = col.row(align=True)
             pct = (locked_count / total_verts * 100) if total_verts > 0 else 0

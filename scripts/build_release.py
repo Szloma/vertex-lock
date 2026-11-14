@@ -45,7 +45,7 @@ def build_package():
     DIST_DIR.mkdir(parents=True, exist_ok=True)
 
     # Read version from manifest
-    version = "1.1.0"
+    version = "1.2.0"
     manifest_file = SOURCE_DIR / "blender_manifest.toml"
     if manifest_file.exists():
         with open(manifest_file, "r", encoding="utf-8") as f:

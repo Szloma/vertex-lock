@@ -11,7 +11,7 @@ if ROOT_DIR not in sys.path:
 
 def run_tests():
     print("=" * 60)
-    print("RUNNING VERTEX LOCK ADDON TEST SUITE (v1.1.0)")
+    print("RUNNING VERTEX LOCK ADDON TEST SUITE (v1.2.0)")
     print("=" * 60)
 
     # Reset to clean scene
@@ -44,6 +44,9 @@ def run_tests():
     kmi_idnames = [kmi.idname for km, kmi in addon_module.addon_keymaps]
     print(f"[PASS] Keymaps registered: {len(addon_module.addon_keymaps)} items in {set(km_names)}")
     assert "mesh.vertex_lock_click_select" in kmi_idnames, "Click select operator missing from keymaps"
+    lock_kmi = next(kmi for km, kmi in addon_module.addon_keymaps if kmi.idname == "mesh.vertex_lock_selected")
+    assert lock_kmi.ctrl and lock_kmi.alt and not lock_kmi.shift, "mesh.vertex_lock_selected must be Ctrl+Alt+L to avoid Shift+L collision"
+    print("[PASS] Shortcut collision defense verified: Lock Selected mapped to Ctrl+Alt+L")
 
     # 2. Test Selection Mode & Locking (Vertex Mode)
     bpy.ops.mesh.primitive_grid_add(x_subdivisions=5, y_subdivisions=5)
@@ -307,7 +310,204 @@ def run_tests():
     assert has_f0, "Locked Face 0 was removed when deleting edges of adjacent face!"
     print("[PASS] Adjacent face edge deletion immunity verified: locked edges and face preserved 100%")
 
-    # 15. Test Unregistration
+    # 15. Test Face Occlusion Immunity (Fix for locked face behind selection)
+    from mathutils import Matrix
+    from blender_vertex_lock.selection import LockSelectionResolver, SelectionRay
+
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0, 0, 0))
+    cube_obj = bpy.context.active_object
+    bpy.ops.object.mode_set(mode='EDIT')
+    cube_bm = bmesh.from_edit_mesh(cube_obj.data)
+    cube_bm.faces.ensure_lookup_table()
+    cube_bm.verts.ensure_lookup_table()
+    cube_bm.edges.ensure_lookup_table()
+
+    c_vert_layer = cube_bm.verts.layers.int.new("vertex_lock")
+    c_face_layer = cube_bm.faces.layers.int.new("face_lock")
+
+    rear_face = [f for f in cube_bm.faces if f.normal.y > 0.9][0]
+    front_face = [f for f in cube_bm.faces if f.normal.y < -0.9][0]
+
+    # Lock the rear face (+Y)
+    rear_face[c_face_layer] = 1
+    for v in rear_face.verts:
+        v[c_vert_layer] = 1
+        v.hide = True
+    bmesh.update_edit_mesh(cube_obj.data)
+
+    resolver = LockSelectionResolver()
+
+    # Front-facing camera looking towards +Y through front face
+    ray_front = SelectionRay(
+        origin_world=Vector((0, -5, 0)),
+        direction_world=Vector((0, 1, 0)),
+        origin_local=Vector((0, -5, 0)),
+        direction_local=Vector((0, 1, 0)),
+        view_matrix=Matrix.Identity(4),
+        mouse_x=500,
+        mouse_y=400,
+        is_perspective=True
+    )
+
+    class MockRaycastServiceFront:
+        def create_selection_ray(self, context, event, obj):
+            return ray_front
+        def raycast_mesh(self, bm, r):
+            return None, None, None, None
+
+    resolver.raycast_service = MockRaycastServiceFront()
+
+    class MockFaceContext:
+        class ToolSettings:
+            mesh_select_mode = (False, False, True)
+        tool_settings = ToolSettings()
+        @property
+        def scene(self):
+            return bpy.context.scene
+
+    hit_type, hit_elem = resolver.resolve(MockFaceContext(), None, cube_obj, cube_bm, c_vert_layer, c_face_layer)
+    assert hit_type is None and hit_elem is None, f"Expected (None, None) when clicking front unlocked face, got {hit_type}, {hit_elem}"
+    print("[PASS] Face Occlusion Immunity verified: Unlocked front face correctly took priority over occluded locked rear face")
+
+    # Now look directly at the rear face (+Y) from camera at (0, 5, 0)
+    ray_rear = SelectionRay(
+        origin_world=Vector((0, 5, 0)),
+        direction_world=Vector((0, -1, 0)),
+        origin_local=Vector((0, 5, 0)),
+        direction_local=Vector((0, -1, 0)),
+        view_matrix=Matrix.Identity(4),
+        mouse_x=500,
+        mouse_y=400,
+        is_perspective=True
+    )
+
+    class MockRaycastServiceRear:
+        def create_selection_ray(self, context, event, obj):
+            return ray_rear
+        def raycast_mesh(self, bm, r):
+            return None, None, None, None
+
+    resolver.raycast_service = MockRaycastServiceRear()
+    hit_type, hit_elem = resolver.resolve(MockFaceContext(), None, cube_obj, cube_bm, c_vert_layer, c_face_layer)
+    assert hit_type == 'FACE' and hit_elem.index == rear_face.index, f"Expected locked rear face hit, got {hit_type}, {hit_elem}"
+    print("[PASS] Direct locked face selection verified when directly visible to camera")
+
+    # 16. Test Multi-Mode Selection Priority & SOLID Resolver Extensibility
+    class MockMultiContext:
+        class ToolSettings:
+            mesh_select_mode = (True, True, True)
+        tool_settings = ToolSettings()
+        @property
+        def scene(self):
+            return bpy.context.scene
+
+    resolver.raycast_service = MockRaycastServiceFront()
+    hit_type, hit_elem = resolver.resolve(MockMultiContext(), None, cube_obj, cube_bm, c_vert_layer, c_face_layer)
+    assert hit_type is None and hit_elem is None, "Multi-mode selection failed: front unlocked element must take priority"
+    print("[PASS] Multi-mode selection priority verified (closest element to camera takes priority)")
+
+    # 17. Test Full-Surface Coverage on Angled Faces (Anti-Self-Occlusion Immunity)
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.mesh.primitive_cube_add(size=2.0)
+    tilted_obj = bpy.context.active_object
+    tilted_obj.rotation_euler = (0.5, 0.5, 0)
+    bpy.ops.object.transform_apply(rotation=True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    tilted_bm = bmesh.from_edit_mesh(tilted_obj.data)
+    tilted_bm.faces.ensure_lookup_table()
+    tilted_bm.verts.ensure_lookup_table()
+
+    t_vert_layer = tilted_bm.verts.layers.int.new("vertex_lock")
+    t_face_layer = tilted_bm.faces.layers.int.new("face_lock")
+
+    # Front-most face (minimum Y center)
+    front_t_face = min(tilted_bm.faces, key=lambda f: f.calc_center_median().y)
+    # Rear-most face (maximum Y center)
+    rear_t_face = max(tilted_bm.faces, key=lambda f: f.calc_center_median().y)
+
+    rear_t_face[t_face_layer] = 1
+    for v in rear_t_face.verts:
+        v[t_vert_layer] = 1
+        v.hide = True
+    bmesh.update_edit_mesh(tilted_obj.data)
+
+    tilted_resolver = LockSelectionResolver()
+
+    # Test rays across corners, edges, and center of front face
+    center_pt = front_t_face.calc_center_median()
+    test_points = [center_pt] + [center_pt * 0.3 + v.co * 0.7 for v in front_t_face.verts]
+
+    for i, pt in enumerate(test_points):
+        ray_t = SelectionRay(
+            origin_world=Vector((pt.x, -10.0, pt.z)),
+            direction_world=Vector((0.0, 1.0, 0.0)),
+            origin_local=Vector((pt.x, -10.0, pt.z)),
+            direction_local=Vector((0.0, 1.0, 0.0)),
+            view_matrix=Matrix.Identity(4),
+            mouse_x=500, mouse_y=400, is_perspective=False
+        )
+        class MockRayServiceTilted:
+            def create_selection_ray(self, context, event, obj): return ray_t
+            def raycast_mesh(self, bm, r): return None, None, None, None
+
+        tilted_resolver.raycast_service = MockRayServiceTilted()
+        hit_type, hit_elem = tilted_resolver.resolve(MockFaceContext(), None, tilted_obj, tilted_bm, t_vert_layer, t_face_layer)
+        assert hit_type is None and hit_elem is None, f"Point {i} on front face falsely selected locked element: {hit_type}, {hit_elem}"
+
+    print(f"[PASS] Full-surface coverage on angled face verified: all {len(test_points)} surface points correctly prioritized front face")
+
+    # 19. Test GPU Overlay Batch Caching & Sub-millisecond Redraw
+    import time
+    from blender_vertex_lock.draw import _batch_cache, draw_callback_view3d, get_cached_counts, tag_redraw_view3d
+
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=50, y_subdivisions=50)
+    perf_obj = bpy.context.active_object
+    bpy.ops.object.mode_set(mode='EDIT')
+    perf_bm = bmesh.from_edit_mesh(perf_obj.data)
+    perf_vlayer = perf_bm.verts.layers.int.new("vertex_lock")
+    perf_flayer = perf_bm.faces.layers.int.new("face_lock")
+
+    for i, v in enumerate(perf_bm.verts):
+        if i % 4 == 0:
+            v[perf_vlayer] = 1
+    bmesh.update_edit_mesh(perf_obj.data)
+
+    bpy.context.scene.vertex_lock_settings.show_overlay = True
+
+    # First draw builds cache
+    draw_callback_view3d()
+    assert not _batch_cache.is_dirty, "Cache should not be dirty after draw"
+    assert _batch_cache.has_locked, "Cache should indicate locked elements"
+    assert _batch_cache.locked_count > 0, "Cache should record locked vertex count"
+
+    # Subsequent draws must hit cache with zero batch re-allocation
+    t_start = time.perf_counter()
+    N_REDRAWS = 50
+    for _ in range(N_REDRAWS):
+        draw_callback_view3d()
+    t_end = time.perf_counter()
+
+    avg_draw_ms = ((t_end - t_start) / N_REDRAWS) * 1000
+    assert avg_draw_ms < 1.0, f"Cached redraw too slow: {avg_draw_ms:.3f} ms"
+    print(f"[PASS] GPU Overlay Batch Caching verified: {avg_draw_ms:.4f} ms per frame ({1000/avg_draw_ms:.0f} FPS)")
+
+    # 20. Test Cache Invalidation and UI Count Consistency
+    cached_counts = get_cached_counts(perf_obj)
+    assert cached_counts is not None, "get_cached_counts should return tuple"
+    assert cached_counts[0] == _batch_cache.locked_count, "Cached locked count mismatch"
+    assert cached_counts[2] == len(perf_bm.verts), "Cached total verts mismatch"
+
+    # Explicit invalidation via tag_redraw_view3d
+    tag_redraw_view3d(invalidate_cache=True)
+    assert _batch_cache.is_dirty, "tag_redraw_view3d should mark cache dirty"
+
+    # Redraw restores clean state
+    draw_callback_view3d()
+    assert not _batch_cache.is_dirty, "Cache should be clean after rebuild"
+    print("[PASS] Cache invalidation & UI count caching verified")
+
+    # 21. Test Unregistration
     try:
         addon_module.unregister()
         print("[PASS] Unregistration successful")
@@ -316,7 +516,7 @@ def run_tests():
         return False
 
     print("=" * 60)
-    print("ALL 15 TEST SUITES COMPLETED AND PASSED PERFECTLY!")
+    print("ALL 20 TEST SUITES COMPLETED AND PASSED PERFECTLY!")
     print("=" * 60)
     return True
 
