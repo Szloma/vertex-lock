@@ -11,7 +11,7 @@ if ROOT_DIR not in sys.path:
 
 def run_tests():
     print("=" * 60)
-    print("RUNNING VERTEX LOCK ADDON TEST SUITE (v1.1.0)")
+    print("RUNNING VERTEX LOCK ADDON TEST SUITE (v1.2.0)")
     print("=" * 60)
 
     # Reset to clean scene
