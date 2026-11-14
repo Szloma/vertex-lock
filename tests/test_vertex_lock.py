@@ -44,6 +44,9 @@ def run_tests():
     kmi_idnames = [kmi.idname for km, kmi in addon_module.addon_keymaps]
     print(f"[PASS] Keymaps registered: {len(addon_module.addon_keymaps)} items in {set(km_names)}")
     assert "mesh.vertex_lock_click_select" in kmi_idnames, "Click select operator missing from keymaps"
+    lock_kmi = next(kmi for km, kmi in addon_module.addon_keymaps if kmi.idname == "mesh.vertex_lock_selected")
+    assert lock_kmi.ctrl and lock_kmi.alt and not lock_kmi.shift, "mesh.vertex_lock_selected must be Ctrl+Alt+L to avoid Shift+L collision"
+    print("[PASS] Shortcut collision defense verified: Lock Selected mapped to Ctrl+Alt+L")
 
     # 2. Test Selection Mode & Locking (Vertex Mode)
     bpy.ops.mesh.primitive_grid_add(x_subdivisions=5, y_subdivisions=5)

@@ -1691,11 +1691,13 @@ def register_keymaps():
 
     km = kc.keymaps.new(name="Mesh", space_type='EMPTY')
 
+    # Lock Selected: Ctrl + Alt + L (avoids overriding Blender's native Shift+L Deselect Linked)
     kmi_lock = km.keymap_items.new(
         "mesh.vertex_lock_selected",
         type='L',
         value='PRESS',
-        shift=True
+        ctrl=True,
+        alt=True
     )
     addon_keymaps.append((km, kmi_lock))
 
