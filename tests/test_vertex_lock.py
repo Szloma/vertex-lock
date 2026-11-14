@@ -454,7 +454,57 @@ def run_tests():
 
     print(f"[PASS] Full-surface coverage on angled face verified: all {len(test_points)} surface points correctly prioritized front face")
 
-    # 18. Test Unregistration
+    # 19. Test GPU Overlay Batch Caching & Sub-millisecond Redraw
+    import time
+    from blender_vertex_lock.draw import _batch_cache, draw_callback_view3d, get_cached_counts, tag_redraw_view3d
+
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=50, y_subdivisions=50)
+    perf_obj = bpy.context.active_object
+    bpy.ops.object.mode_set(mode='EDIT')
+    perf_bm = bmesh.from_edit_mesh(perf_obj.data)
+    perf_vlayer = perf_bm.verts.layers.int.new("vertex_lock")
+    perf_flayer = perf_bm.faces.layers.int.new("face_lock")
+
+    for i, v in enumerate(perf_bm.verts):
+        if i % 4 == 0:
+            v[perf_vlayer] = 1
+    bmesh.update_edit_mesh(perf_obj.data)
+
+    bpy.context.scene.vertex_lock_settings.show_overlay = True
+
+    # First draw builds cache
+    draw_callback_view3d()
+    assert not _batch_cache.is_dirty, "Cache should not be dirty after draw"
+    assert _batch_cache.has_locked, "Cache should indicate locked elements"
+    assert _batch_cache.locked_count > 0, "Cache should record locked vertex count"
+
+    # Subsequent draws must hit cache with zero batch re-allocation
+    t_start = time.perf_counter()
+    N_REDRAWS = 50
+    for _ in range(N_REDRAWS):
+        draw_callback_view3d()
+    t_end = time.perf_counter()
+
+    avg_draw_ms = ((t_end - t_start) / N_REDRAWS) * 1000
+    assert avg_draw_ms < 1.0, f"Cached redraw too slow: {avg_draw_ms:.3f} ms"
+    print(f"[PASS] GPU Overlay Batch Caching verified: {avg_draw_ms:.4f} ms per frame ({1000/avg_draw_ms:.0f} FPS)")
+
+    # 20. Test Cache Invalidation and UI Count Consistency
+    cached_counts = get_cached_counts(perf_obj)
+    assert cached_counts is not None, "get_cached_counts should return tuple"
+    assert cached_counts[0] == _batch_cache.locked_count, "Cached locked count mismatch"
+    assert cached_counts[2] == len(perf_bm.verts), "Cached total verts mismatch"
+
+    # Explicit invalidation via tag_redraw_view3d
+    tag_redraw_view3d(invalidate_cache=True)
+    assert _batch_cache.is_dirty, "tag_redraw_view3d should mark cache dirty"
+
+    # Redraw restores clean state
+    draw_callback_view3d()
+    assert not _batch_cache.is_dirty, "Cache should be clean after rebuild"
+    print("[PASS] Cache invalidation & UI count caching verified")
+
+    # 21. Test Unregistration
     try:
         addon_module.unregister()
         print("[PASS] Unregistration successful")
@@ -463,7 +513,7 @@ def run_tests():
         return False
 
     print("=" * 60)
-    print("ALL 18 TEST SUITES COMPLETED AND PASSED PERFECTLY!")
+    print("ALL 20 TEST SUITES COMPLETED AND PASSED PERFECTLY!")
     print("=" * 60)
     return True
 
