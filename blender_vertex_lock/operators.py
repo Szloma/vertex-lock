@@ -6,6 +6,7 @@ from mathutils import Vector
 from bpy_extras import view3d_utils
 from bpy.props import BoolProperty, IntProperty, StringProperty
 from .draw import tag_redraw_view3d
+from .selection import LockSelectionResolver
 
 def get_edit_mesh_and_layers(context):
     """Utility to retrieve active bmesh and vertex/face lock custom layers."""
@@ -57,134 +58,16 @@ def update_mesh_lock_visibility(bm, vert_lock_layer, face_lock_layer):
             e.hide = False
 
 
+_selection_resolver = LockSelectionResolver()
+
+
 def find_locked_element_under_mouse(context, event, obj, bm, vert_lock_layer, face_lock_layer):
     """
-    Raycasts / projects 3D mesh elements to 2D viewport coordinates.
-    Returns ('VERT'|'EDGE'|'FACE', element) if a locked element is under the cursor.
-    If an unlocked element is closer to the cursor, returns (None, None) to let Blender handle it.
+    Resolves selection under mouse cursor using LockSelectionResolver.
+    Returns ('VERT'|'EDGE'|'FACE', element) if a locked element is under the cursor and has priority.
+    If an unlocked element is closer to the camera or in front, returns (None, None) to let Blender handle it.
     """
-    region = context.region
-    rv3d = getattr(context.space_data, 'region_3d', None) if (context.space_data and context.space_data.type == 'VIEW_3D') else getattr(context, 'region_data', None)
-    if not region or not rv3d:
-        return None, None
-
-    mouse_x = event.mouse_region_x
-    mouse_y = event.mouse_region_y
-    mouse_vec = Vector((mouse_x, mouse_y, 0.0))
-
-    select_mode = context.tool_settings.mesh_select_mode
-    is_vert_mode, is_edge_mode, is_face_mode = select_mode
-
-    mat = obj.matrix_world
-    view_mat = rv3d.view_matrix
-
-    # 1. Vertices
-    if is_vert_mode:
-        best_v = None
-        min_dist_sq = 196.0  # 14px tolerance squared
-        best_depth = -float('inf')
-        closest_unlocked_dist_sq = float('inf')
-
-        for v in bm.verts:
-            world_co = mat @ v.co
-            screen_co = view3d_utils.location_3d_to_region_2d(region, rv3d, world_co)
-            if screen_co is None:
-                continue
-
-            dx = screen_co.x - mouse_x
-            dy = screen_co.y - mouse_y
-            dist_sq = dx * dx + dy * dy
-
-            is_locked = (v[vert_lock_layer] in {1, 2} or v.hide)
-            if not is_locked:
-                if dist_sq < closest_unlocked_dist_sq:
-                    closest_unlocked_dist_sq = dist_sq
-            else:
-                if dist_sq <= 196.0:
-                    depth = (view_mat @ world_co).z
-                    if dist_sq < min_dist_sq:
-                        min_dist_sq = dist_sq
-                        best_depth = depth
-                        best_v = v
-                    elif abs(dist_sq - min_dist_sq) < 9.0 and depth > best_depth:
-                        best_depth = depth
-                        best_v = v
-
-        if best_v and closest_unlocked_dist_sq >= min_dist_sq:
-            return 'VERT', best_v
-
-    # 2. Edges
-    elif is_edge_mode:
-        best_e = None
-        min_dist = 12.0  # 12px tolerance
-        best_depth = -float('inf')
-
-        for e in bm.edges:
-            is_locked_e = (e.verts[0][vert_lock_layer] in {1, 2} or e.verts[0].hide) and \
-                          (e.verts[1][vert_lock_layer] in {1, 2} or e.verts[1].hide)
-            if not is_locked_e:
-                continue
-
-            p0 = view3d_utils.location_3d_to_region_2d(region, rv3d, mat @ e.verts[0].co)
-            p1 = view3d_utils.location_3d_to_region_2d(region, rv3d, mat @ e.verts[1].co)
-            if p0 is None or p1 is None:
-                continue
-
-            p0_3d = Vector((p0.x, p0.y, 0.0))
-            p1_3d = Vector((p1.x, p1.y, 0.0))
-            proj, factor = mathutils.geometry.intersect_point_line(mouse_vec, p0_3d, p1_3d)
-            if 0.0 <= factor <= 1.0:
-                dist = (mouse_vec - proj).length
-            elif factor < 0.0:
-                dist = (mouse_vec - p0_3d).length
-            else:
-                dist = (mouse_vec - p1_3d).length
-
-            if dist <= min_dist:
-                mid_world = mat @ ((e.verts[0].co + e.verts[1].co) * 0.5)
-                depth = (view_mat @ mid_world).z
-                if dist < min_dist or depth > best_depth:
-                    min_dist = dist
-                    best_depth = depth
-                    best_e = e
-
-        if best_e:
-            return 'EDGE', best_e
-
-    # 3. Faces
-    elif is_face_mode:
-        best_f = None
-        best_depth = -float('inf')
-
-        for f in bm.faces:
-            is_locked_f = (face_lock_layer and f[face_lock_layer] in {1, 2}) or \
-                          all(v[vert_lock_layer] in {1, 2} or v.hide for v in f.verts)
-            if not is_locked_f:
-                continue
-
-            pts_2d = [view3d_utils.location_3d_to_region_2d(region, rv3d, mat @ v.co) for v in f.verts]
-            if any(p is None for p in pts_2d):
-                continue
-
-            inside = False
-            for i in range(1, len(pts_2d) - 1):
-                if mathutils.geometry.intersect_point_tri_2d(
-                    Vector((mouse_x, mouse_y)), pts_2d[0], pts_2d[i], pts_2d[i + 1]
-                ):
-                    inside = True
-                    break
-
-            if inside:
-                center_world = mat @ f.calc_center_median()
-                depth = (view_mat @ center_world).z
-                if depth > best_depth:
-                    best_depth = depth
-                    best_f = f
-
-        if best_f:
-            return 'FACE', best_f
-
-    return None, None
+    return _selection_resolver.resolve(context, event, obj, bm, vert_lock_layer, face_lock_layer)
 
 
 class MESH_OT_vertex_lock_click_select(bpy.types.Operator):
